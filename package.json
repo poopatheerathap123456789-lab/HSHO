@@ -8,7 +8,7 @@
     "dev": "nodemon server.js"
   },
   "keywords": [],
-  "author": "Kaiwaii4ever",
+  "author": "Light In The Night Studio",
   "_moduleAliases": {
     "@src": "src",
     "@config": "src/config",
