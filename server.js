@@ -6,6 +6,8 @@ require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const { execSync } = require('child_process');
+const path = require('path');
+const fs = require('fs');
 
 // โหลด config และตั้งค่า Fallback เพื่อป้องกัน Server ค้าง/พังหากขาดค่าใน config
 let config = {};
@@ -15,26 +17,56 @@ try {
   config = {};
 }
 
-// 🟢 ฟังก์ชันดึงชื่อจาก Steam ผ่าน Windows Registry
+// 🟢 ฟังก์ชันดึงชื่อจาก Steam (ดึงจาก Registry -> ไฟล์ loginusers.vdf -> AutoLoginUser)
 function getSteamUsername() {
+  // 1. ลองดึงจาก Registry PersonaName (ซ่อน stderr ไม่ให้แสดงข้อความ error)
   try {
-    const stdout = execSync('reg query "HKCU\\Software\\Valve\\Steam" /v PersonaName', { 
+    const stdout = execSync('reg query "HKCU\\Software\\Valve\\Steam" /v PersonaName 2>nul', { 
       encoding: 'utf8', 
-      windowsHide: true 
+      windowsHide: true,
+      stdio: ['pipe', 'pipe', 'ignore']
     });
     const match = stdout.match(/PersonaName\s+REG_SZ\s+(.+)/i);
     if (match && match[1] && match[1].trim()) {
       return match[1].trim();
     }
-  } catch (e) {
-    try {
-      const psOut = execSync('powershell -Command "(Get-ItemProperty -Path \'HKCU:\\Software\\Valve\\Steam\').PersonaName"', { 
-        encoding: 'utf8', 
-        windowsHide: true 
-      });
-      if (psOut && psOut.trim()) return psOut.trim();
-    } catch (err) {}
-  }
+  } catch (e) {}
+
+  // 2. ถ้าใน Registry ไม่มี ให้หา path โฟลเดอร์ Steam แล้วอ่านจาก loginusers.vdf
+  try {
+    const stdoutPath = execSync('reg query "HKCU\\Software\\Valve\\Steam" /v SteamPath 2>nul', { 
+      encoding: 'utf8', 
+      windowsHide: true,
+      stdio: ['pipe', 'pipe', 'ignore']
+    });
+    const matchPath = stdoutPath.match(/SteamPath\s+REG_SZ\s+(.+)/i);
+    if (matchPath && matchPath[1]) {
+      const steamPath = matchPath[1].trim();
+      const vdfPath = path.join(steamPath, 'config', 'loginusers.vdf');
+      
+      if (fs.existsSync(vdfPath)) {
+        const vdfContent = fs.readFileSync(vdfPath, 'utf8');
+        const personaMatches = [...vdfContent.matchAll(/"PersonaName"\s+"([^"]+)"/g)];
+        if (personaMatches.length > 0) {
+          return personaMatches[personaMatches.length - 1][1];
+        }
+      }
+    }
+  } catch (e) {}
+
+  // 3. ดึงจาก AutoLoginUser
+  try {
+    const stdoutUser = execSync('reg query "HKCU\\Software\\Valve\\Steam" /v AutoLoginUser 2>nul', { 
+      encoding: 'utf8', 
+      windowsHide: true,
+      stdio: ['pipe', 'pipe', 'ignore']
+    });
+    const matchUser = stdoutUser.match(/AutoLoginUser\s+REG_SZ\s+(.+)/i);
+    if (matchUser && matchUser[1] && matchUser[1].trim()) {
+      return matchUser[1].trim();
+    }
+  } catch (e) {}
+
   return `player_${Math.floor(1000 + Math.random() * 9000)}`;
 }
 
@@ -52,7 +84,7 @@ const app = express();
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
-// 🟢 Middleware แนบชื่อ Steam เข้าไปใน req.steamUsername สำหรับใช้งานใน Route
+// 🟢 Middleware แนบชื่อ Steam เข้าไปใน req.steamUsername
 app.use((req, _res, next) => {
   req.steamUsername = getSteamUsername();
   next();
@@ -85,7 +117,6 @@ async function start() {
   try {
     console.log('[DB] Connecting to MongoDB...');
     
-    // เชื่อมต่อ MongoDB พร้อมตั้งค่า dbName
     await mongoose.connect(MONGO_URI, {
       dbName: DB_NAME
     });
