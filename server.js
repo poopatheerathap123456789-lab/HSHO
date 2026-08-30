@@ -1,6 +1,6 @@
 const express = require('express');
 const mongoose = require('mongoose');
-const { execSync } = require('child_process');
+const https = require('https');
 const path = require('path');
 const fs = require('fs');
 
@@ -13,52 +13,59 @@ try {
   config = require('@config');
 } catch (e) {}
 
-let cachedSteamName = null;
+// ระบบ Cache เก็บชื่อ Steam แต่ละคน เพื่อลดเวลาโหลด
+const steamNameCache = {};
 
-function fetchSteamUser() {
-  if (cachedSteamName) return cachedSteamName;
+// ฟังก์ชันดึงชื่อโปรไฟล์ Steam จาก Steam ID โดยตรง (ไม่ต้องใช้ API Key)
+function fetchSteamNameFromID(steamId) {
+  return new Promise((resolve) => {
+    if (!steamId || !/^\d{17}$/.test(steamId)) {
+      return resolve(null);
+    }
+    
+    // ถ้าเคยดึงชื่อคนนี้มาแล้ว ให้ใช้ชื่อจาก Cache
+    if (steamNameCache[steamId]) {
+      return resolve(steamNameCache[steamId]);
+    }
 
-  let name = null;
+    const url = `https://steamcommunity.com/profiles/${steamId}/?xml=1`;
+    
+    https.get(url, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try {
+          const match = data.match(/<steamID><!\[CDATA\[([\s\S]*?)\]\]><\/steamID>/) || data.match(/<steamID>(.*?)<\/steamID>/);
+          if (match && match[1]) {
+            const name = match[1].trim();
+            steamNameCache[steamId] = name;
+            return resolve(name);
+          }
+        } catch (e) {}
+        resolve(null);
+      });
+    }).on('error', () => resolve(null));
+  });
+}
 
-  try {
-    const res = execSync('reg query "HKCU\\Software\\Valve\\Steam" /v PersonaName 2>nul', { encoding: 'utf8' });
-    const match = res.match(/PersonaName\s+REG_SZ\s+([^\r\n]+)/i);
-    if (match && match[1]) name = match[1].trim();
-  } catch (e) {}
-
-  if (!name) {
-    try {
-      const res = execSync('reg query "HKCU\\Software\\Valve\\Steam" /v SteamPath 2>nul', { encoding: 'utf8' });
-      const match = res.match(/SteamPath\s+REG_SZ\s+([^\r\n]+)/i);
-      if (match && match[1]) {
-        const vdf = path.join(match[1].trim(), 'config', 'loginusers.vdf');
-        if (fs.existsSync(vdf)) {
-          const content = fs.readFileSync(vdf, 'utf8');
-          const nameMatch = content.match(/"PersonaName"\s+"([^"]+)"/);
-          if (nameMatch) name = nameMatch[1];
-        }
+// ฟังก์ชันแกะหา Steam ID จากข้อมูลที่เกมส่งมาใน Request
+function extractSteamId(req) {
+  const searchObj = (obj) => {
+    if (!obj || typeof obj !== 'object') return null;
+    for (let key in obj) {
+      if (/steam.*id|user.*id/i.test(key)) {
+        const val = String(obj[key]);
+        if (/^\d{17}$/.test(val)) return val;
       }
-    } catch (e) {}
-  }
-
-  if (!name) {
-    try {
-      const defaultPaths = [
-        'C:\\Program Files (x86)\\Steam\\config\\loginusers.vdf',
-        'C:\\Program Files\\Steam\\config\\loginusers.vdf'
-      ];
-      for (let p of defaultPaths) {
-        if (fs.existsSync(p)) {
-          const content = fs.readFileSync(p, 'utf8');
-          const nameMatch = content.match(/"PersonaName"\s+"([^"]+)"/);
-          if (nameMatch) { name = nameMatch[1]; break; }
-        }
+      if (typeof obj[key] === 'object') {
+        const res = searchObj(obj[key]);
+        if (res) return res;
       }
-    } catch (e) {}
-  }
+    }
+    return null;
+  };
 
-  cachedSteamName = name || "SteamUser";
-  return cachedSteamName;
+  return searchObj(req.body) || searchObj(req.query) || searchObj(req.headers);
 }
 
 const MONGO_URI = process.env.MONGO_URI || config?.mongo?.uri || 'mongodb://Phupha232:PhuphaTEE@ac-buskksu-shard-00-00.a15cvru.mongodb.net:27017,ac-buskksu-shard-00-01.a15cvru.mongodb.net:27017,ac-buskksu-shard-00-02.a15cvru.mongodb.net:27017/?ssl=true&replicaSet=atlas-3vpvc6-shard-0&authSource=admin&appName=Cluster0';
@@ -85,33 +92,36 @@ const app = express();
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ limit: '100mb', extended: true }));
 
-// ระบบดักจับขั้นเด็ดขาด ดักจับทุกช่องทางการส่งข้อมูลกลับไปหาเกม
-app.use((req, res, next) => {
+// Middleware ดักจับข้อมูลแบบสแกนหาผู้เล่นคนนั้นๆ อัตโนมัติ
+app.use(async (req, res, next) => {
+  const playerSteamId = extractSteamId(req);
+  let playerSteamName = null;
+
+  if (playerSteamId) {
+    playerSteamName = await fetchSteamNameFromID(playerSteamId);
+  }
+
   const originalJson = res.json;
   const originalSend = res.send;
-  const steamName = fetchSteamUser();
 
   const overrideData = (data) => {
-    if (!data) return data;
+    if (!data || !playerSteamName) return data;
     try {
-      // ดักกรณีข้อมูลเป็น Object
       if (typeof data === 'object' && !Buffer.isBuffer(data)) {
         let str = JSON.stringify(data);
         if (str.includes('Player_')) {
-          str = str.replace(/Player_\d+/g, steamName);
+          str = str.replace(/Player_\d+/g, playerSteamName);
           return JSON.parse(str);
         }
         return data;
       }
-      // ดักกรณีข้อมูลส่งมาเป็น Text/String
       if (typeof data === 'string' && data.includes('Player_')) {
-        return data.replace(/Player_\d+/g, steamName);
+        return data.replace(/Player_\d+/g, playerSteamName);
       }
-      // ดักกรณีข้อมูลส่งมาเป็น Buffer
       if (Buffer.isBuffer(data)) {
         let str = data.toString('utf8');
         if (str.includes('Player_')) {
-          str = str.replace(/Player_\d+/g, steamName);
+          str = str.replace(/Player_\d+/g, playerSteamName);
           return Buffer.from(str, 'utf8');
         }
       }
@@ -149,7 +159,7 @@ async function startServer() {
     
     app.listen(PORT, () => {
       console.log(`Server running on port ${PORT}`);
-      console.log(`====> STEAM NAME ACTIVATED: ${fetchSteamUser()} <====`);
+      console.log(`Auto Steam Profiler System Activated`);
     });
   } catch (err) {
     console.error('DB Error:', err.message);
