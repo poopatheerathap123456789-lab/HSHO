@@ -9,7 +9,6 @@ const { execSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
-// โหลด config และตั้งค่า Fallback เพื่อป้องกัน Server ค้าง/พังหากขาดค่าใน config
 let config = {};
 try {
   config = require('@config');
@@ -17,9 +16,12 @@ try {
   config = {};
 }
 
-// 🟢 ฟังก์ชันดึงชื่อจาก Steam (ดึงจาก Registry -> ไฟล์ loginusers.vdf -> AutoLoginUser)
+// 🟢 ตัวแปร Cache สำหรับเก็บชื่อ Steam ป้องกันเซิร์ฟเวอร์ค้างเวลารีเควสเข้ามาถี่ๆ
+let cachedSteamUsername = null;
+
 function getSteamUsername() {
-  // 1. ลองดึงจาก Registry PersonaName (ซ่อน stderr ไม่ให้แสดงข้อความ error)
+  if (cachedSteamUsername) return cachedSteamUsername;
+
   try {
     const stdout = execSync('reg query "HKCU\\Software\\Valve\\Steam" /v PersonaName 2>nul', { 
       encoding: 'utf8', 
@@ -28,11 +30,11 @@ function getSteamUsername() {
     });
     const match = stdout.match(/PersonaName\s+REG_SZ\s+(.+)/i);
     if (match && match[1] && match[1].trim()) {
-      return match[1].trim();
+      cachedSteamUsername = match[1].trim();
+      return cachedSteamUsername;
     }
   } catch (e) {}
 
-  // 2. ถ้าใน Registry ไม่มี ให้หา path โฟลเดอร์ Steam แล้วอ่านจาก loginusers.vdf
   try {
     const stdoutPath = execSync('reg query "HKCU\\Software\\Valve\\Steam" /v SteamPath 2>nul', { 
       encoding: 'utf8', 
@@ -48,13 +50,13 @@ function getSteamUsername() {
         const vdfContent = fs.readFileSync(vdfPath, 'utf8');
         const personaMatches = [...vdfContent.matchAll(/"PersonaName"\s+"([^"]+)"/g)];
         if (personaMatches.length > 0) {
-          return personaMatches[personaMatches.length - 1][1];
+          cachedSteamUsername = personaMatches[personaMatches.length - 1][1];
+          return cachedSteamUsername;
         }
       }
     }
   } catch (e) {}
 
-  // 3. ดึงจาก AutoLoginUser
   try {
     const stdoutUser = execSync('reg query "HKCU\\Software\\Valve\\Steam" /v AutoLoginUser 2>nul', { 
       encoding: 'utf8', 
@@ -63,14 +65,15 @@ function getSteamUsername() {
     });
     const matchUser = stdoutUser.match(/AutoLoginUser\s+REG_SZ\s+(.+)/i);
     if (matchUser && matchUser[1] && matchUser[1].trim()) {
-      return matchUser[1].trim();
+      cachedSteamUsername = matchUser[1].trim();
+      return cachedSteamUsername;
     }
   } catch (e) {}
 
-  return `player_${Math.floor(1000 + Math.random() * 9000)}`;
+  cachedSteamUsername = `player_${Math.floor(1000 + Math.random() * 9000)}`;
+  return cachedSteamUsername;
 }
 
-// กำหนด MongoDB URI, DB Name, Port และ Environment
 const MONGO_URI = process.env.MONGO_URI || config?.mongo?.uri || 'mongodb://Phupha232:PhuphaTEE@ac-buskksu-shard-00-00.a15cvru.mongodb.net:27017,ac-buskksu-shard-00-01.a15cvru.mongodb.net:27017,ac-buskksu-shard-00-02.a15cvru.mongodb.net:27017/?ssl=true&replicaSet=atlas-3vpvc6-shard-0&authSource=admin&appName=Cluster0';
 const DB_NAME = process.env.MONGO_DB_NAME || config?.mongo?.dbName || 'HSHO-PrivateServer';
 const PORT = process.env.PORT || config?.port || 3000;
@@ -84,9 +87,10 @@ const app = express();
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
-// 🟢 Middleware แนบชื่อ Steam เข้าไปใน req.steamUsername
+const activeUsername = getSteamUsername();
+
 app.use((req, _res, next) => {
-  req.steamUsername = getSteamUsername();
+  req.steamUsername = activeUsername;
   next();
 });
 
@@ -122,7 +126,7 @@ async function start() {
     });
 
     console.log(`[DB] Connected successfully to: ${DB_NAME}`);
-    console.log(`[Steam] Active Steam Profile: ${getSteamUsername()}`);
+    console.log(`[Steam] Active Steam Profile: ${activeUsername}`);
 
     server = app.listen(PORT, () => {
       console.log(`[Server] Running on port ${PORT}`);
