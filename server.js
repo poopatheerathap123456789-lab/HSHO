@@ -57,7 +57,7 @@ function fetchSteamUser() {
     } catch (e) {}
   }
 
-  cachedSteamName = name || "SteamUser"; // ลบระบบสุ่ม Player_xxxx ออกถาวร
+  cachedSteamName = name || "SteamUser";
   return cachedSteamName;
 }
 
@@ -85,35 +85,48 @@ const app = express();
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ limit: '100mb', extended: true }));
 
-// ระบบดักจับและเขียนทับชื่อให้เป็นชื่อ Steam แบบบังคับ
+// ระบบดักจับขั้นเด็ดขาด ดักจับทุกช่องทางการส่งข้อมูลกลับไปหาเกม
 app.use((req, res, next) => {
-  const originalJson = res.json.bind(res);
+  const originalJson = res.json;
+  const originalSend = res.send;
   const steamName = fetchSteamUser();
 
-  res.json = function(body) {
-    if (body) {
-      // ใช้วิธีแปลงเป็นตัวหนังสือแล้วค้นหาคำว่า Player_ ตามด้วยตัวเลข เพื่อลบของเก่าทิ้ง
-      let strBody = JSON.stringify(body);
-      strBody = strBody.replace(/Player_\d+/g, steamName);
-      
-      try {
-        body = JSON.parse(strBody);
-      } catch(e) {}
-      
-      // บังคับแก้ชื่อตัวแปรหลักๆ ซ้ำอีกรอบกันเหนียว
-      if (body.data && typeof body.data === 'object') {
-        if (body.data.username) body.data.username = steamName;
-        if (body.data.displayName) body.data.displayName = steamName;
-        if (body.data.name) body.data.name = steamName;
-        
-        if (body.data.profile) {
-          if (body.data.profile.username) body.data.profile.username = steamName;
-          if (body.data.profile.displayName) body.data.profile.displayName = steamName;
+  const overrideData = (data) => {
+    if (!data) return data;
+    try {
+      // ดักกรณีข้อมูลเป็น Object
+      if (typeof data === 'object' && !Buffer.isBuffer(data)) {
+        let str = JSON.stringify(data);
+        if (str.includes('Player_')) {
+          str = str.replace(/Player_\d+/g, steamName);
+          return JSON.parse(str);
+        }
+        return data;
+      }
+      // ดักกรณีข้อมูลส่งมาเป็น Text/String
+      if (typeof data === 'string' && data.includes('Player_')) {
+        return data.replace(/Player_\d+/g, steamName);
+      }
+      // ดักกรณีข้อมูลส่งมาเป็น Buffer
+      if (Buffer.isBuffer(data)) {
+        let str = data.toString('utf8');
+        if (str.includes('Player_')) {
+          str = str.replace(/Player_\d+/g, steamName);
+          return Buffer.from(str, 'utf8');
         }
       }
-    }
-    return originalJson(body);
+    } catch (e) {}
+    return data;
   };
+
+  res.json = function(body) {
+    return originalJson.call(this, overrideData(body));
+  };
+
+  res.send = function(body) {
+    return originalSend.call(this, overrideData(body));
+  };
+
   next();
 });
 
@@ -136,7 +149,7 @@ async function startServer() {
     
     app.listen(PORT, () => {
       console.log(`Server running on port ${PORT}`);
-      console.log(`====> STEAM NAME LOADED: ${fetchSteamUser()} <====`);
+      console.log(`====> STEAM NAME ACTIVATED: ${fetchSteamUser()} <====`);
     });
   } catch (err) {
     console.error('DB Error:', err.message);
